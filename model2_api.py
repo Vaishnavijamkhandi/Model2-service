@@ -7,10 +7,10 @@
 #  2. Make sure quickprint_model.pkl is in the same folder
 #  3. Run: uvicorn model2_api:app --reload
 #  4. Open browser: http://localhost:8001/docs
-#     (port 8001 so it doesn't clash with Model 1 on 8000)
 # ============================================================
 
 from fastapi import FastAPI, HTTPException
+from fastapi.middleware.cors import CORSMiddleware        # ← NEW
 from pydantic import BaseModel, Field
 import joblib
 import pandas as pd
@@ -22,6 +22,15 @@ app = FastAPI(
     title="QuickPrint — Model 2 API",
     description="Predicts wait time (in minutes) for a print order based on queue state and job details.",
     version="1.0.0"
+)
+
+# ── CORS: allow React app to call this API ───────────────────  ← NEW
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],        # allow all origins (localhost, deployed site, etc.)
+    allow_credentials=True,
+    allow_methods=["*"],        # allow GET, POST, etc.
+    allow_headers=["*"],        # allow all headers
 )
 
 
@@ -93,30 +102,24 @@ class WaitTimeResponse(BaseModel):
 
 # ── Helper: build student message and urgency ────────────────
 def get_wait_info(wait_minutes: float):
-
-    # round to 1 decimal for display
     wait_display = round(wait_minutes, 1)
 
     if wait_minutes <= 3:
         urgency = "Low"
         message = f"Your order will be ready in about {wait_display} minutes. Almost instant!"
         advice  = "You can wait at the shop — it will be done very quickly."
-
     elif wait_minutes <= 10:
         urgency = "Low"
         message = f"Your order will be ready in about {wait_display} minutes."
         advice  = "You can wait at the shop or grab a quick coffee nearby."
-
     elif wait_minutes <= 20:
         urgency = "Medium"
         message = f"Your order will be ready in approximately {wait_display} minutes."
         advice  = "You have time to step away. Come back in about 15-20 minutes."
-
     elif wait_minutes <= 35:
         urgency = "High"
         message = f"It's busy right now. Expected wait is {wait_display} minutes."
         advice  = "Consider coming back later or check if another vendor has shorter queue."
-
     else:
         urgency = "High"
         message = f"Very high demand. Expected wait is {wait_display} minutes."
@@ -146,7 +149,6 @@ def health():
 def predict_wait_time(request: WaitTimeRequest):
 
     try:
-        # Step 1: build input dataframe
         input_data = pd.DataFrame([{
             "queue_length"      : request.queue_length,
             "backlog_pages"     : request.backlog_pages,
@@ -158,16 +160,10 @@ def predict_wait_time(request: WaitTimeRequest):
             "predicted_demand"  : request.predicted_demand,
         }])
 
-        # Step 2: run the model
         raw_prediction = model.predict(input_data)[0]
-
-        # Step 3: clip to realistic range — no negative wait times
-        wait_minutes = float(max(0.1, raw_prediction))
-
-        # Step 4: get message, urgency, advice
+        wait_minutes   = float(max(0.1, raw_prediction))
         message, urgency, advice = get_wait_info(wait_minutes)
 
-        # Step 5: return response
         return WaitTimeResponse(
             estimated_wait_minutes = round(wait_minutes, 1),
             message_to_student     = message,
@@ -179,12 +175,9 @@ def predict_wait_time(request: WaitTimeRequest):
         raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
 
 
-# ── ROUTE 4: Combined prediction (Model 1 + Model 2 together) 
+# ── ROUTE 4: Combined prediction ────────────────────────────
 @app.post("/predict/full")
 def predict_full(request: WaitTimeRequest):
-    # this route shows everything in one response
-    # useful for your frontend dashboard
-
     try:
         input_data = pd.DataFrame([{
             "queue_length"      : request.queue_length,
@@ -201,10 +194,9 @@ def predict_full(request: WaitTimeRequest):
         wait_minutes = float(max(0.1, raw))
         message, urgency, advice = get_wait_info(wait_minutes)
 
-        # calculate completion time from now
         import datetime
-        now              = datetime.datetime.now()
-        completion_time  = now + datetime.timedelta(minutes=wait_minutes)
+        now             = datetime.datetime.now()
+        completion_time = now + datetime.timedelta(minutes=wait_minutes)
 
         return {
             "estimated_wait_minutes" : round(wait_minutes, 1),
@@ -227,11 +219,7 @@ def predict_full(request: WaitTimeRequest):
 # ── ROUTE 5: Compare scenarios ───────────────────────────────
 @app.post("/predict/compare")
 def compare_scenarios(request: WaitTimeRequest):
-    # given the current order, show what happens under 3 conditions
-    # useful to show student: "if you wait 1 hour, queue will be shorter"
-
     scenarios = [
-        # current situation
         {
             "label"           : "Right now",
             "queue_length"    : request.queue_length,
@@ -239,7 +227,6 @@ def compare_scenarios(request: WaitTimeRequest):
             "active_printers" : request.active_printers,
             "predicted_demand": request.predicted_demand,
         },
-        # if student comes back in 1 hour (queue likely shorter)
         {
             "label"           : "If you come back in 1 hour",
             "queue_length"    : max(1, request.queue_length - 4),
@@ -247,7 +234,6 @@ def compare_scenarios(request: WaitTimeRequest):
             "active_printers" : request.active_printers,
             "predicted_demand": max(5, request.predicted_demand - 8),
         },
-        # if vendor adds one more printer
         {
             "label"           : "If one more printer is activated",
             "queue_length"    : request.queue_length,
